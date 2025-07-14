@@ -1,4 +1,3 @@
-# app/models/survey.py
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -48,6 +47,7 @@ class Survey(BaseModel):
     brand_color: Optional[str] = None
     brand_logo_url: Optional[str] = None
     brand_font: Optional[str] = None
+    is_public: bool = False  # ✅ NUEVO CAMPO
     creator_id: PyObjectId = Field(...)
 
     model_config = {
@@ -60,10 +60,31 @@ class Survey(BaseModel):
                 "description": "Una encuesta para evaluar el ambiente de trabajo.",
                 "questions": [],
                 "status": "created",
+                "is_public": True,
                 "creator_id": "60c728ef69d7a2b2c8e1e3e4"
             }
         }
     }
+
+
+class SurveyCreate(BaseModel):
+    title: str = Field(..., min_length=3, max_length=100)
+    description: Optional[str] = None
+    questions: List[Question] = []
+    status: str = "created"
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    brand_color: Optional[str] = None
+    brand_logo_url: Optional[str] = None
+    brand_font: Optional[str] = None
+    is_public: bool = False  # ✅ NUEVO CAMPO
+
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str}
+    }
+
 
 class SurveyTemplate(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
@@ -78,10 +99,11 @@ class SurveyTemplate(BaseModel):
         "json_encoders": {ObjectId: str}
     }
 
+
 class SurveyResponse(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     survey_id: PyObjectId
-    responder_id: Optional[str] = None
+    responder_email: Optional[str] = None  # ✅ Ahora es explícito
     answers: Dict[str, Any]
     submitted_at: datetime = Field(default_factory=datetime.utcnow)
 

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.database import connect_to_mongo, close_mongo_connection # Importa las funciones de DB
-from app.routes import survey_routes, auth_routes # Importa los routers
+from app.database import connect_to_mongo, close_mongo_connection
+from app.routes import survey_routes, auth_routes, survey_response_routes
 
 
 app = FastAPI(
@@ -37,8 +37,9 @@ async def shutdown_event():
     await close_mongo_connection()
 
 
-app.include_router(survey_routes.router, tags=["Surveys"], prefix="/api/v1/surveys")
-app.include_router(auth_routes.router, tags=["Auth"], prefix="/api/v1/auth")
+app.include_router(survey_routes.router, tags=["Surveys"], prefix="/api/survey_api/surveys")
+app.include_router(auth_routes.router, tags=["Auth"], prefix="/api/survey_api/auth")
+app.include_router(survey_response_routes.router, tags=["Survey Responses"], prefix="/api/survey_api/survey-responses")
 
 @app.get("/", tags=["Root"])
 async def read_root():

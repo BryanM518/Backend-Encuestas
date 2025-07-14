@@ -1,3 +1,5 @@
+from datetime import datetime
+from bson import ObjectId
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional
 
@@ -5,8 +7,7 @@ class UserCreate(BaseModel):
     """Modelo para crear un nuevo usuario (registro)."""
     username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
-    password: str = Field(..., min_length=8) # La contraseña en texto plano para el registro
-
+    password: str = Field(..., min_length=8)
     model_config = {
         "json_schema_extra": {
             "example": {

@@ -1,31 +1,45 @@
-# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import survey_routes
+from app.database import connect_to_mongo, close_mongo_connection # Importa las funciones de DB
+from app.routes import survey_routes, auth_routes # Importa los routers
+
 
 app = FastAPI(
-    title="Backend de Plataforma de Encuestas Inteligentes",
-    description="API para gestionar encuestas, plantillas y respuestas.",
+    title="API de Encuestas Inteligentes",
+    description="Backend para la creación y gestión de encuestas inteligentes.",
     version="0.1.0",
 )
 
 # Configuración de CORS
 origins = [
-    "http://localhost:8081",  # La URL donde corre tu frontend de Vue.js
-    "http://127.0.0.1:8081",  # Alternativa de localhost
-    # Añade aquí cualquier otro origen si tu frontend se despliega en otro lugar
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    # "http://localhost:8081", 
+    # "http://127.0.0.1:8081",
 ]
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Permite todos los métodos (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"], # Permite todas las cabeceras
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-app.include_router(survey_routes.router, prefix="/api/v1", tags=["Encuestas"])
+# Eventos de inicio y cierre de la aplicación para manejar la conexión a la DB
+@app.on_event("startup")
+async def startup_event():
+    await connect_to_mongo()
 
-@app.get("/")
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection()
+
+
+app.include_router(survey_routes.router, tags=["Surveys"], prefix="/api/v1/surveys")
+app.include_router(auth_routes.router, tags=["Auth"], prefix="/api/v1/auth")
+
+@app.get("/", tags=["Root"])
 async def read_root():
-    return {"message": "¡Bienvenido a la API de la Plataforma de Encuestas Inteligentes!"}
+    return {"message": "Bienvenido a la API de Encuestas Inteligentes"}

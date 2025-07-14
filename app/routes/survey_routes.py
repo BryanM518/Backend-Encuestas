@@ -1,85 +1,108 @@
 # app/routes/survey_routes.py
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from typing import List
+from app.models.survey import Survey 
+from app.models.user import User 
+from app.database import get_collection 
+from app.auth import get_current_user 
+from motor.motor_asyncio import AsyncIOMotorClient 
+from bson import ObjectId 
 from datetime import datetime
-from bson import ObjectId
-
-from app.database import get_collection
-from app.models.survey import Survey, SurveyTemplate, SurveyResponse
 
 router = APIRouter()
 
-surveys_collection = get_collection("surveys")
-survey_templates_collection = get_collection("survey_templates")
-survey_responses_collection = get_collection("survey_responses")
+async def get_surveys_collection_dependency() -> AsyncIOMotorClient:
+    """Retorna la colección de 'surveys' de la base de datos."""
+    return get_collection("surveys")
 
-def serialize_mongo_doc(doc):
-    if doc:
-        doc["id"] = str(doc["_id"])
-        del doc["_id"]
-    return doc
 
-# --- Survey Endpoints ---
+@router.post("/", response_model=Survey, status_code=status.HTTP_201_CREATED, summary="Crear una nueva encuesta (Requiere autenticación)")
+async def create_survey(
+    survey: Survey,
+    current_user: User = Depends(get_current_user),
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+):
+    survey.creator_id = current_user.id
+    
+    survey_data = survey.model_dump(by_alias=True, exclude=["id"])
 
-@router.post("/surveys/", response_model=Survey, status_code=status.HTTP_201_CREATED)
-async def create_survey(survey: Survey):
-    try:
-        survey_to_insert = survey.model_dump(by_alias=True)
+    result = await surveys_collection.insert_one(survey_data)
+    
+    new_survey = await surveys_collection.find_one({"_id": result.inserted_id})
+    return Survey(**new_survey)
 
-        result = await surveys_collection.insert_one(survey_to_insert)
-        created_survey = await surveys_collection.find_one({"_id": result.inserted_id})
-        if created_survey:
-            return Survey(**created_survey)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve created survey")
-    except Exception as e:
-        print(f"Error creating survey: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error creating survey: {e}")
+@router.get("/", response_model=List[Survey], summary="Obtener todas las encuestas del usuario actual (Requiere autenticación)")
+async def get_surveys(
+    current_user: User = Depends(get_current_user),
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+):
+    user_surveys = await surveys_collection.find({"creator_id": current_user.id}).to_list(1000)
+    return [Survey(**survey) for survey in user_surveys]
 
-@router.get("/surveys/", response_model=List[Survey])
-async def get_all_surveys():
-    surveys = []
-    async for survey in surveys_collection.find():
-        surveys.append(serialize_mongo_doc(survey))
-    return surveys
+@router.get("/{id}", response_model=Survey, summary="Obtener una encuesta por ID (Requiere autenticación, solo propias)")
+async def get_survey_by_id(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+):
+    if not ObjectId.is_valid(id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
 
-@router.get("/surveys/{survey_id}", response_model=Survey)
-async def get_survey(survey_id: str):
-    survey = await surveys_collection.find_one({"_id": ObjectId(survey_id)})
+    survey = await surveys_collection.find_one({"_id": ObjectId(id), "creator_id": current_user.id})
     if survey:
-        return serialize_mongo_doc(survey)
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found")
+        return Survey(**survey)
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found or you don't have permission")
 
-@router.put("/surveys/{survey_id}", response_model=Survey)
-async def update_survey(survey_id: str, survey: Survey):
-    update_data = survey.model_dump(by_alias=True, exclude_unset=True)
+@router.put("/{id}", response_model=Survey, summary="Actualizar una encuesta (Requiere autenticación, solo propias)")
+async def update_survey(
+    id: str,
+    survey: Survey,
+    current_user: User = Depends(get_current_user),
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+):
+    if not ObjectId.is_valid(id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    existing_survey = await surveys_collection.find_one({"_id": ObjectId(id), "creator_id": current_user.id})
+    if not existing_survey:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found or you don't have permission")
+
+    update_data = survey.model_dump(by_alias=True, exclude_unset=True, exclude=["id", "creator_id", "created_at"])
+    
     update_data["updated_at"] = datetime.utcnow()
-    result = await surveys_collection.update_one( # Esperar la operación de actualización
-        {"_id": ObjectId(survey_id)}, {"$set": update_data}
+
+    if "questions" in update_data:
+        for q in update_data["questions"]:
+            if "_id" in q and isinstance(q["_id"], str) and q["_id"].startswith('temp_'):
+                del q["_id"]
+            if q.get("type") not in ['multiple_choice', 'checkbox_group'] and q.get("options") is not None:
+                del q["options"]
+            elif q.get("type") in ['multiple_choice', 'checkbox_group'] and (q.get("options") is None or len(q["options"]) == 0):
+                q["options"] = []
+
+
+    result = await surveys_collection.update_one(
+        {"_id": ObjectId(id)},
+        {"$set": update_data}
     )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found")
-    updated_survey = await surveys_collection.find_one({"_id": ObjectId(survey_id)}) # Esperar la operación de búsqueda
-    return serialize_mongo_doc(updated_survey)
 
-@router.delete("/surveys/{survey_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_survey(survey_id: str):
-    result = await surveys_collection.delete_one({"_id": ObjectId(survey_id)}) # Esperar la operación de eliminación
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found")
-    return
+    if result.modified_count == 1:
+        updated_survey = await surveys_collection.find_one({"_id": ObjectId(id)})
+        return Survey(**updated_survey)
+    
+    return Survey(**existing_survey)
 
-@router.post("/survey-templates/", response_model=SurveyTemplate, status_code=status.HTTP_201_CREATED)
-async def create_survey_template(template: SurveyTemplate):
-    template_dict = template.model_dump(by_alias=True)
-    template_dict["_id"] = ObjectId()
-    result = await survey_templates_collection.insert_one(template_dict)
-    created_template = await survey_templates_collection.find_one({"_id": result.inserted_id})
-    return serialize_mongo_doc(created_template)
 
-@router.post("/survey-responses/", response_model=SurveyResponse, status_code=status.HTTP_201_CREATED)
-async def submit_survey_response(response: SurveyResponse):
-    response_dict = response.model_dump(by_alias=True)
-    response_dict["_id"] = ObjectId()
-    result = await survey_responses_collection.insert_one(response_dict)
-    created_response = await survey_responses_collection.find_one({"_id": result.inserted_id})
-    return serialize_mongo_doc(created_response)
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar una encuesta (Requiere autenticación, solo propias)")
+async def delete_survey(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+):
+    if not ObjectId.is_valid(id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format")
+
+    result = await surveys_collection.delete_one({"_id": ObjectId(id), "creator_id": current_user.id})
+    if result.deleted_count == 1:
+        return # FastAPI maneja 204 No Content para None o respuesta vacía
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survey not found or you don't have permission")

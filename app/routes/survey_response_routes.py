@@ -10,9 +10,6 @@ from typing import List, Dict, Any
 
 router = APIRouter()
 
-# ----------------------
-# UTILIDAD GENERAL
-# ----------------------
 def convert_objectids_to_str(data: Any) -> Any:
     if isinstance(data, dict):
         return {k: convert_objectids_to_str(v) for k, v in data.items()}
@@ -22,19 +19,12 @@ def convert_objectids_to_str(data: Any) -> Any:
         return str(data)
     return data
 
-# ----------------------
-# DEPENDENCIAS
-# ----------------------
 async def get_survey_collection():
     return get_collection("surveys")
 
 async def get_response_collection():
     return get_collection("survey_responses")
 
-
-# ----------------------
-# ENVIAR RESPUESTA (PÚBLICO)
-# ----------------------
 @router.post(
     "/surveys/{survey_id}/responses",
     status_code=status.HTTP_201_CREATED,
@@ -42,7 +32,7 @@ async def get_response_collection():
 )
 async def submit_response(
     survey_id: str,
-    answers: Dict[str, Any],  # JSON plano: {"question_id": respuesta}
+    response_data: Dict[str, Any],  # Cambiado a response_data para incluir email
     surveys_collection=Depends(get_survey_collection),
     responses_collection=Depends(get_response_collection)
 ):
@@ -53,8 +43,13 @@ async def submit_response(
     if not survey:
         raise HTTPException(status_code=404, detail="Encuesta no encontrada")
 
+    # Extraer answers y responder_email del payload
+    answers = response_data.get("answers", {})
+    responder_email = response_data.get("responder_email", "")
+
     response_doc = {
         "survey_id": ObjectId(survey_id),
+        "responder_email": responder_email,
         "answers": answers,
         "submitted_at": datetime.utcnow()
     }
@@ -65,10 +60,6 @@ async def submit_response(
         "response_id": str(result.inserted_id)
     }
 
-
-# ----------------------
-# OBTENER RESPUESTAS (AUTENTICADO)
-# ----------------------
 @router.get(
     "/surveys/{survey_id}/responses",
     response_model=List[SurveyResponse],

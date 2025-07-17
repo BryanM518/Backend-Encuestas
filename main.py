@@ -9,25 +9,24 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Configuración de CORS mejorada
+# Configuración de CORS
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    # Agrega aquí cualquier otro dominio en desarrollo
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos los métodos
-    allow_headers=["*"],  # Permite todos los encabezados
-    expose_headers=["*"]  # Expone todos los encabezados
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# Eventos de inicio y cierre de la aplicación para manejar la conexión a la DB
+# Eventos de conexión a la base de datos
 @app.on_event("startup")
 async def startup_event():
     await connect_to_mongo()
@@ -36,10 +35,10 @@ async def startup_event():
 async def shutdown_event():
     await close_mongo_connection()
 
-# Incluye los routers con el prefijo correcto
+# Rutas con prefijos corregidos
 app.include_router(survey_routes.router, tags=["Surveys"], prefix="/api/survey_api/surveys")
 app.include_router(auth_routes.router, tags=["Auth"], prefix="/api/survey_api/auth")
-app.include_router(survey_response_routes.router, tags=["Survey Responses"], prefix="/api/survey_api/survey-responses")
+app.include_router(survey_response_routes.router, tags=["Survey Responses"], prefix="/api/survey_api")
 app.include_router(survey_invitations_routes.router, tags=["Survey Invitations"], prefix="/api/survey_api/invitations")
 
 @app.get("/", tags=["Root"])

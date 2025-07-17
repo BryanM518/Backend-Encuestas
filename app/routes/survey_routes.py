@@ -202,15 +202,19 @@ async def delete_survey(
 async def submit_survey_response(
     id: str,
     response_data: dict,
-    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency),
+    responses_collection: AsyncIOMotorClient = Depends(get_responses_collection_dependency)
 ):
     print("Datos recibidos:", response_data)
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="ID inválido")
 
-    doc = await surveys_collection.find_one({"_id": ObjectId(id), "is_public": True})
+    # 🔁 Aquí ya no se filtra por is_public
+    doc = await surveys_collection.find_one({"_id": ObjectId(id)})
     if not doc:
-        raise HTTPException(status_code=404, detail="Encuesta no encontrada o privada")
+        raise HTTPException(status_code=404, detail="Encuesta no encontrada")
+
+    # Si quieres validar acceso privado, hazlo aquí (ej: por token en request)
 
     survey = Survey(**convert_objectids_to_str(doc))
     responder_email = response_data.pop("responder_email", None)
@@ -220,7 +224,6 @@ async def submit_survey_response(
         if not isinstance(responder_email, str) or "@" not in responder_email:
             raise HTTPException(status_code=400, detail="Correo inválido")
 
-        responses_collection = get_collection("survey_responses")
         existing = await responses_collection.find_one({
             "survey_id": ObjectId(id),
             "responder_email": responder_email
@@ -237,8 +240,9 @@ async def submit_survey_response(
         "submitted_at": datetime.utcnow()
     }
 
-    result = await get_collection("survey_responses").insert_one(submission)
+    result = await responses_collection.insert_one(submission)
     return {"message": "Respuesta registrada", "response_id": str(result.inserted_id)}
+
 
 # ------------------------------
 # ESTADÍSTICAS Y RESPUESTAS

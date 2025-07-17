@@ -10,13 +10,31 @@ from typing import List, Dict, Any
 
 router = APIRouter()
 
-# Dependencies
+# ----------------------
+# UTILIDAD GENERAL
+# ----------------------
+def convert_objectids_to_str(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {k: convert_objectids_to_str(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_objectids_to_str(i) for i in data]
+    elif isinstance(data, ObjectId):
+        return str(data)
+    return data
+
+# ----------------------
+# DEPENDENCIAS
+# ----------------------
 async def get_survey_collection():
     return get_collection("surveys")
 
 async def get_response_collection():
     return get_collection("survey_responses")
 
+
+# ----------------------
+# ENVIAR RESPUESTA (PÚBLICO)
+# ----------------------
 @router.post(
     "/surveys/{survey_id}/responses",
     status_code=status.HTTP_201_CREATED,
@@ -42,8 +60,15 @@ async def submit_response(
     }
 
     result = await responses_collection.insert_one(response_doc)
-    return {"message": "Respuestas enviadas correctamente", "response_id": str(result.inserted_id)}
+    return {
+        "message": "Respuestas enviadas correctamente",
+        "response_id": str(result.inserted_id)
+    }
 
+
+# ----------------------
+# OBTENER RESPUESTAS (AUTENTICADO)
+# ----------------------
 @router.get(
     "/surveys/{survey_id}/responses",
     response_model=List[SurveyResponse],
@@ -66,4 +91,5 @@ async def get_survey_responses(
         raise HTTPException(status_code=403, detail="No tienes permiso para ver estas respuestas")
 
     responses = await responses_collection.find({"survey_id": ObjectId(survey_id)}).to_list(length=1000)
-    return [SurveyResponse(**r) for r in responses]
+
+    return [SurveyResponse(**convert_objectids_to_str(r)) for r in responses]

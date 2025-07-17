@@ -1,56 +1,54 @@
-from collections import Counter
-from typing import List, Dict, Any
+from typing import Dict, Any
 from bson import ObjectId
+from app.database import get_collection
 
-def compute_survey_statistics(survey: dict, responses: List[dict]) -> List[Dict[str, Any]]:
-    questions = survey.get("questions", [])
-    stats = []
+async def compute_survey_statistics(survey_id: str) -> Dict[str, Any]:
+    if not ObjectId.is_valid(survey_id):
+        raise ValueError("ID de encuesta inválido")
 
-    for question in questions:
-        qid = str(question["_id"])
-        qtext = question["text"]
-        qtype = question["type"]
+    surveys_collection = get_collection("surveys")
+    responses_collection = get_collection("survey_responses")
 
-        data = {
-            "question_id": qid,
-            "text": qtext,
-            "type": qtype,
+    # Obtener encuesta
+    survey = await surveys_collection.find_one({"_id": ObjectId(survey_id)})
+    if not survey:
+        raise ValueError("Encuesta no encontrada")
+
+    # Obtener respuestas
+    responses = await responses_collection.find({"survey_id": ObjectId(survey_id)}).to_list(1000)
+
+    stats = {}
+
+    # Inicializar estadísticas por pregunta
+    for question in survey.get("questions", []):
+        qid_str = str(question["_id"])  # ✅ Convertimos a string para usarlo como clave
+        stats[qid_str] = {
+            "text": question["text"],
+            "type": question["type"],
+            "options": {},       # Para preguntas con opciones
+            "responses": []      # Para texto libre u otros valores
         }
 
-        # Obtener respuestas para esta pregunta
-        all_answers = [
-            resp["answers"].get(qid)
-            for resp in responses
-            if qid in resp["answers"]
-        ]
+    # Contar respuestas
+    for response in responses:
+        for raw_qid, answer in response.get("answers", {}).items():
+            qid = str(raw_qid)  # ✅ Convertimos también aquí
 
-        if qtype == "multiple_choice":
-            data["distribution"] = dict(Counter(all_answers))
+            if qid not in stats:
+                continue  # Pregunta eliminada o no registrada
 
-        elif qtype == "checkbox_group":
-            flat = []
-            for ans in all_answers:
-                if isinstance(ans, list):
-                    flat.extend(ans)
-            data["distribution"] = dict(Counter(flat))
+            q_stats = stats[qid]
+            q_type = q_stats["type"]
 
-        elif qtype == "satisfaction_scale":
-            numeric = [int(a) for a in all_answers if str(a).isdigit()]
-            data["average"] = round(sum(numeric) / len(numeric), 2) if numeric else 0
-            data["counts"] = dict(Counter(map(str, numeric)))
+            if q_type in ["multiple_choice", "satisfaction_scale", "number_input"]:
+                q_stats["options"][str(answer)] = q_stats["options"].get(str(answer), 0) + 1
 
-        elif qtype == "number_input":
-            numeric = [float(a) for a in all_answers if isinstance(a, (int, float, str)) and str(a).replace('.', '', 1).isdigit()]
-            if numeric:
-                data["average"] = round(sum(numeric) / len(numeric), 2)
-                data["min"] = min(numeric)
-                data["max"] = max(numeric)
-            else:
-                data["average"] = data["min"] = data["max"] = None
+            elif q_type == "checkbox_group":
+                if isinstance(answer, list):
+                    for opt in answer:
+                        q_stats["options"][str(opt)] = q_stats["options"].get(str(opt), 0) + 1
 
-        elif qtype == "text_input":
-            data["responses"] = all_answers
-
-        stats.append(data)
+            elif q_type == "text_input":
+                q_stats["responses"].append(str(answer))
 
     return stats

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from typing import List, Dict, Any
 from app.services.survey_stats import compute_survey_statistics
 from app.models.survey import Survey, SurveyCreate, SurveyResponse, Question, VisibleIfCondition
@@ -268,8 +268,9 @@ async def get_survey_responses(
 @router.get("/{id}/stats")
 async def get_survey_stats(
     id: str,
+    request: Request,
     current_user: User = Depends(get_current_user),
-    surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
+    surveys_collection=Depends(get_surveys_collection_dependency)
 ):
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="ID inválido")
@@ -278,5 +279,35 @@ async def get_survey_stats(
     if not survey or str(survey["creator_id"]) != str(current_user.id):
         raise HTTPException(status_code=403, detail="No autorizado")
 
-    stats = await compute_survey_statistics(id)
+    # Extraer todos los parámetros de filtro
+    filters = dict(request.query_params)
+    filter_pairs = []
+    
+    i = 0
+    while f"filter_qid_{i}" in filters:
+        if f"filter_value_{i}" in filters and f"filter_operator_{i}" in filters:
+            try:
+                value = float(filters[f"filter_value_{i}"])  # Convertir a float para soportar decimales
+                filter_pairs.append({
+                    "qid": filters[f"filter_qid_{i}"],
+                    "value": value,
+                    "operator": filters[f"filter_operator_{i}"]
+                })
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Valor inválido para el filtro {i}")
+        i += 1
+
+    # Validar operadores
+    valid_operators = {"equals", "less_than", "greater_than", "less_than_or_equal", "greater_than_or_equal"}
+    for f in filter_pairs:
+        if f["operator"] not in valid_operators:
+            raise HTTPException(status_code=400, detail=f"Operador inválido: {f['operator']}")
+
+    # Validar que los filtros sean para preguntas de tipo number_input
+    question_ids = {str(q["_id"]) for q in survey.get("questions", []) if q["type"] == "number_input"}
+    for f in filter_pairs:
+        if f["qid"] not in question_ids:
+            raise HTTPException(status_code=400, detail=f"El filtro para la pregunta {f['qid']} no es de tipo number_input")
+
+    stats = await compute_survey_statistics(id, filter_pairs)
     return stats

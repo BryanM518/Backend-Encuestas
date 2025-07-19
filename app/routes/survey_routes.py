@@ -16,7 +16,6 @@ from app.services.pdf_report import generate_pdf_report
 import pandas as pd
 from io import BytesIO, StringIO
 
-
 router = APIRouter()
 
 # Directorio para almacenar los logos
@@ -166,31 +165,131 @@ async def get_surveys(
     current_user: User = Depends(get_current_user),
     surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
 ):
-    surveys = await surveys_collection.find({"creator_id": current_user.id}).to_list(1000)
-    updated_surveys = []
+    # Pipeline de agregación para obtener la versión más reciente de cada encuesta
+    pipeline = [
+        # Filtrar encuestas por creator_id
+        {"$match": {"creator_id": current_user.id}},
+        
+        # Normalizar parent_id: convertir strings a ObjectIds donde sea necesario
+        {
+            "$addFields": {
+                "normalized_parent_id": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": ["$parent_id", None]},
+                                {"$ne": [{"$type": "$parent_id"}, "objectId"]}
+                            ]
+                        },
+                        {"$toObjectId": "$parent_id"},  # Convertir string a ObjectId
+                        "$parent_id"  # Mantener el valor original si ya es ObjectId o None
+                    ]
+                }
+            }
+        },
+        
+        # Ordenar por version descendente para asegurar que la más reciente esté primero
+        {"$sort": {"version": -1}},
+        
+        # Agrupar por normalized_parent_id (o _id si normalized_parent_id es null)
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$normalized_parent_id", "$_id"]},
+                "latest_survey": {"$first": "$$ROOT"}
+            }
+        },
+        
+        # Reemplazar el documento raíz con la encuesta más reciente
+        {"$replaceRoot": {"newRoot": "$latest_survey"}},
+        
+        # Eliminar el campo temporal normalized_parent_id
+        {"$unset": "normalized_parent_id"},
+        
+        # Ordenar por created_at
+        {"$sort": {"created_at": -1}}
+    ]
+
+    # Ejecutar la agregación
+    surveys = await surveys_collection.aggregate(pipeline).to_list(1000)
+    
+    # Actualizar el estado de cada encuesta y convertir a modelo Survey
+    latest_surveys = []
     for survey in surveys:
         survey["status"] = update_survey_status(survey)
         await surveys_collection.update_one(
             {"_id": survey["_id"]},
             {"$set": {"status": survey["status"]}}
         )
-        updated_surveys.append(Survey(**convert_objectids_to_str(survey)))
-    return updated_surveys
+        latest_surveys.append(Survey(**convert_objectids_to_str(survey)))
+
+    # Depuración: Imprimir las encuestas filtradas
+    print("Encuestas filtradas:", surveys)
+    
+    return latest_surveys
 
 @router.get("/public", response_model=List[Survey])
 async def get_public_surveys(
     surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
 ):
-    surveys = await surveys_collection.find({"is_public": True}).to_list(1000)
-    updated_surveys = []
+    # Pipeline para obtener la última versión de cada encuesta pública
+    pipeline = [
+        
+        # Normalizar parent_id
+        {
+            "$addFields": {
+                "normalized_parent_id": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": ["$parent_id", None]},
+                                {"$ne": [{"$type": "$parent_id"}, "objectId"]}
+                            ]
+                        },
+                        {"$toObjectId": "$parent_id"},
+                        "$parent_id"
+                    ]
+                }
+            }
+        },
+        
+        # Ordenar por versión descendente
+        {"$sort": {"version": -1}},
+        
+        # Agrupar por familia de encuestas
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$normalized_parent_id", "$_id"]},
+                "latest_survey": {"$first": "$$ROOT"}
+            }
+        },
+        
+        # Reemplazar con la encuesta más reciente
+        {"$replaceRoot": {"newRoot": "$latest_survey"}},
+        
+        # Eliminar campo temporal
+        {"$unset": "normalized_parent_id"},
+        
+        # Filtrar solo encuestas publicadas
+        {"$match": {"status": "published"}},
+        
+        # Ordenar por fecha de creación
+        {"$sort": {"created_at": -1}}
+    ]
+
+    # Ejecutar agregación
+    surveys = await surveys_collection.aggregate(pipeline).to_list(1000)
+    
+    # Actualizar el estado de cada encuesta y convertir a modelo Survey
+    latest_surveys = []
     for survey in surveys:
         survey["status"] = update_survey_status(survey)
         await surveys_collection.update_one(
             {"_id": survey["_id"]},
             {"$set": {"status": survey["status"]}}
         )
-        updated_surveys.append(Survey(**convert_objectids_to_str(survey)))
-    return updated_surveys
+        latest_surveys.append(Survey(**convert_objectids_to_str(survey)))
+    
+    return latest_surveys
 
 @router.get("/public/{id}", response_model=Survey)
 async def get_public_survey_by_id(
@@ -257,11 +356,30 @@ async def update_survey(
     if not existing:
         raise HTTPException(status_code=404, detail="Encuesta no encontrada")
 
-    update_data = survey.model_dump(by_alias=True, exclude=["id", "creator_id", "created_at"])
-    update_data["updated_at"] = datetime.utcnow()
-    update_data["status"] = update_survey_status(update_data)
+    # Determinar el parent_id original
+    parent_id = existing.get("parent_id") or existing["_id"]
 
+    # Buscar la versión más alta relacionada al parent_id
+    latest = await surveys_collection.find({
+        "$or": [{"_id": parent_id}, {"parent_id": str(parent_id)}]
+    }).sort("version", -1).to_list(1)
+    latest_version = latest[0].get("version", 1) if latest else 1
+
+    # Preparar nueva versión de la encuesta
+    update_data = survey.model_dump(by_alias=True, exclude=["id", "creator_id", "created_at"])
+    update_data["version"] = latest_version + 1
+    update_data["parent_id"] = str(parent_id)
+    update_data["title"] = f"{survey.title} v{update_data['version']}"
+    update_data["status"] = "created"
+    update_data["start_date"] = survey.start_date
+    update_data["end_date"] = survey.end_date
+    update_data["created_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.utcnow()
+    update_data["creator_id"] = current_user.id
+
+    # Clonar preguntas con nuevos ObjectId
     temp_id_map = {}
+    new_questions = []
     for q in update_data.get("questions", []):
         if is_temp_id(q.get("_id", "")):
             new_id = ObjectId()
@@ -269,16 +387,20 @@ async def update_survey(
             q["_id"] = new_id
         elif not q.get("_id"):
             q["_id"] = ObjectId()
+        new_questions.append(q)
+    update_data["questions"] = new_questions
 
+    # Actualizar referencias en visible_if
     for q in update_data.get("questions", []):
         if q.get("visible_if"):
             ref_id = q["visible_if"].get("question_id")
             if ref_id in temp_id_map:
                 q["visible_if"]["question_id"] = temp_id_map[ref_id]
 
-    await surveys_collection.update_one({"_id": ObjectId(id)}, {"$set": update_data})
-    updated = await surveys_collection.find_one({"_id": ObjectId(id)})
-    return Survey(**convert_objectids_to_str(updated))
+    # Insertar nueva versión
+    result = await surveys_collection.insert_one(update_data)
+    new_survey = await surveys_collection.find_one({"_id": result.inserted_id})
+    return Survey(**convert_objectids_to_str(new_survey))
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_survey(
@@ -546,3 +668,74 @@ async def export_survey_data(
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename=encuesta_{id}.csv"}
         )
+    
+@router.post("/{survey_id}/clone", response_model=Survey)
+async def clone_survey_version(
+    survey_id: str,
+    current_user: User = Depends(get_current_user),
+    surveys_collection=Depends(get_surveys_collection_dependency)
+):
+    if not ObjectId.is_valid(survey_id):
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    original = await surveys_collection.find_one({"_id": ObjectId(survey_id)})
+    if not original or str(original["creator_id"]) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="No autorizado para duplicar esta encuesta")
+
+    # Determinar el parent_id original
+    parent_id = original.get("parent_id") or original["_id"]
+
+    # Buscar la versión más alta relacionada al parent_id
+    latest = await surveys_collection.find({
+        "$or": [{"_id": parent_id}, {"parent_id": str(parent_id)}]
+    }).sort("version", -1).to_list(1)
+    latest_version = latest[0].get("version", 1) if latest else 1
+
+    # Preparar nueva encuesta clonada
+    new_survey = original.copy()
+    new_survey.pop("_id", None)
+    new_survey["version"] = latest_version + 1
+    new_survey["parent_id"] = str(parent_id)
+    new_survey["title"] = f"{original['title']} v{new_survey['version']}"
+    new_survey["status"] = "created"
+    new_survey["start_date"] = original.get["start_date"]
+    new_survey["end_date"] = original.get["end_date"]
+    new_survey["created_at"] = datetime.utcnow()
+    new_survey["updated_at"] = datetime.utcnow()
+
+    # Clonar preguntas con nuevos ObjectId
+    new_questions = []
+    for q in new_survey.get("questions", []):
+        q["_id"] = ObjectId()
+        new_questions.append(q)
+    new_survey["questions"] = new_questions
+
+    result = await surveys_collection.insert_one(new_survey)
+    new_survey["_id"] = result.inserted_id
+
+    print(Survey(**convert_objectids_to_str(new_survey)))
+    return Survey(**convert_objectids_to_str(new_survey))
+
+@router.get("/{survey_id}/versions", response_model=List[Survey])
+async def get_survey_versions(survey_id: str):
+    collection = get_collection("surveys")
+
+    base_survey = await collection.find_one({"_id": ObjectId(survey_id)})
+    if not base_survey:
+        raise HTTPException(status_code=404, detail="Encuesta no encontrada")
+
+    parent_id = base_survey.get("parent_id", base_survey["_id"])
+
+    cursor = collection.find({
+        "$or": [
+            {"_id": parent_id},
+            {"parent_id": parent_id}
+        ]
+    }).sort("version", 1)
+
+    raw_surveys = await cursor.to_list(length=100)
+
+    surveys = [Survey(**convert_objectids_to_str(s)) for s in raw_surveys]
+    print(surveys)
+
+    return surveys

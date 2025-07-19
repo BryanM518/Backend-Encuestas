@@ -8,6 +8,9 @@ from pydantic_core import core_schema
 import uuid
 import re
 
+# ——————————————————————————
+# ID Helpers
+# ——————————————————————————
 class PyObjectIdStr(str):
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):
@@ -32,16 +35,16 @@ class PyObjectIdStr(str):
                 raise ValueError("Invalid ObjectId format")
         raise ValueError("Invalid ObjectId format")
 
+
+# ——————————————————————————
+# Logic Condition
+# ——————————————————————————
 class VisibleIfCondition(BaseModel):
     question_id: PyObjectIdStr = Field(
-        "",
-        description="ID de la pregunta de referencia"
+        "", description="ID de la pregunta de referencia"
     )
     operator: Literal["equals", "not_equals", "in", "not_in"] = "equals"
-    value: Any = Field(
-        ...,
-        description="Valor esperado para la condición"
-    )
+    value: Any = Field(..., description="Valor esperado para la condición")
 
     model_config = {
         "populate_by_name": True,
@@ -55,6 +58,10 @@ class VisibleIfCondition(BaseModel):
             return v
         return str(v)
 
+
+# ——————————————————————————
+# Question Model
+# ——————————————————————————
 class QuestionType(str, Enum):
     TEXT_INPUT = "text_input"
     MULTIPLE_CHOICE = "multiple_choice"
@@ -62,16 +69,17 @@ class QuestionType(str, Enum):
     NUMBER_INPUT = "number_input"
     CHECKBOX_GROUP = "checkbox_group"
 
+
 class Question(BaseModel):
     id: PyObjectIdStr = Field(
-        default_factory=PyObjectIdStr, 
+        default_factory=PyObjectIdStr,
         alias="_id",
         description="ID único de la pregunta"
     )
     type: QuestionType
     text: str = Field(..., min_length=1, max_length=500)
     options: Optional[List[str]] = Field(
-        None, 
+        None,
         description="Opciones para preguntas de opción múltiple o checkbox"
     )
     is_required: bool = False
@@ -92,6 +100,10 @@ class Question(BaseModel):
             self.options = None
         return self
 
+
+# ——————————————————————————
+# Survey Base
+# ——————————————————————————
 class SurveyBase(BaseModel):
     title: str = Field(..., min_length=3, max_length=100)
     description: Optional[str] = Field(None, max_length=500)
@@ -120,22 +132,32 @@ class SurveyBase(BaseModel):
     def validate_font(cls, v):
         if v:
             valid_fonts = [
-                "Arial", "Helvetica", "Times New Roman", "Georgia", 
+                "Arial", "Helvetica", "Times New Roman", "Georgia",
                 "Roboto", "Open Sans", "Lato", "Montserrat"
             ]
             if v not in valid_fonts:
                 raise ValueError(f"La tipografía debe ser una de: {', '.join(valid_fonts)}")
         return v
 
+
+# ——————————————————————————
+# Survey Create
+# ——————————————————————————
 class SurveyCreate(SurveyBase):
     pass
 
+
+# ——————————————————————————
+# Survey Model (Full)
+# ——————————————————————————
 class Survey(SurveyBase):
     id: PyObjectIdStr = Field(default_factory=PyObjectIdStr, alias="_id")
     creator_id: PyObjectIdStr
     created_at: datetime
     updated_at: datetime
     status: str = "created"
+    parent_id: Optional[PyObjectIdStr] = None  # 🔁 Versión original (si aplica)
+    version: int = 1                            # 🔢 Número de versión
 
     model_config = {
         "populate_by_name": True,
@@ -156,11 +178,17 @@ class Survey(SurveyBase):
                 "logo_url": "https://example.com/logo.png",
                 "primary_color": "#3498db",
                 "secondary_color": "#2ecc71",
-                "font_family": "Roboto"
+                "font_family": "Roboto",
+                "version": 2,
+                "parent_id": "60c728ef69d7a2b2c8e1e3e4"
             }
         }
     }
 
+
+# ——————————————————————————
+# Survey Response
+# ——————————————————————————
 class SurveyResponseBase(BaseModel):
     survey_id: PyObjectIdStr
     responder_email: Optional[str] = None
@@ -174,6 +202,7 @@ class SurveyResponseBase(BaseModel):
             raise ValueError("Formato de correo electrónico inválido")
         return v
 
+
 class SurveyResponse(SurveyResponseBase):
     id: PyObjectIdStr = Field(default_factory=PyObjectIdStr, alias="_id")
     submitted_at: datetime
@@ -184,6 +213,10 @@ class SurveyResponse(SurveyResponseBase):
         "json_encoders": {ObjectId: str},
     }
 
+
+# ——————————————————————————
+# Survey Access Token
+# ——————————————————————————
 class SurveyAccessToken(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     survey_id: str

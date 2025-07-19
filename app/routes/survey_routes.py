@@ -1,15 +1,27 @@
-from fastapi import APIRouter, HTTPException, Request, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse
 from typing import List, Dict, Any
-from app.services.survey_stats import compute_survey_statistics
-from app.models.survey import Survey, SurveyCreate, SurveyResponse, Question, VisibleIfCondition
-from app.models.user import User 
-from app.database import get_collection 
-from app.auth import get_current_user 
-from motor.motor_asyncio import AsyncIOMotorClient 
-from bson import ObjectId 
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 from datetime import datetime
+import uuid
+import os
+import aiofiles
+from app.models.survey import Survey, SurveyCreate, SurveyResponse
+from app.models.user import User
+from app.database import get_collection
+from app.auth import get_current_user
+from app.services.survey_stats import compute_survey_statistics
+from app.services.pdf_report import generate_pdf_report
+import pandas as pd
+from io import BytesIO, StringIO
+
 
 router = APIRouter()
+
+# Directorio para almacenar los logos
+UPLOAD_DIR = "uploads/surveys"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ------------------------------
 # UTILS
@@ -29,6 +41,18 @@ def convert_objectids_to_str(data: dict) -> dict:
 
 def is_temp_id(id_str: str) -> bool:
     return isinstance(id_str, str) and id_str.startswith("temp_")
+
+def update_survey_status(survey: dict) -> str:
+    """Determina el estado de la encuesta basado en las fechas"""
+    now = datetime.utcnow()
+    start_date = survey.get("start_date")
+    end_date = survey.get("end_date")
+    
+    if end_date and now > end_date:
+        return "closed"
+    elif start_date and now >= start_date:
+        return "published"
+    return "created"
 
 def validate_conditional_logic(survey: Survey, answers: Dict[str, Any]):
     for q in survey.questions:
@@ -73,6 +97,47 @@ async def get_responses_collection_dependency() -> AsyncIOMotorClient:
     return get_collection("survey_responses")
 
 # ------------------------------
+# CARGA DE LOGOS
+# ------------------------------
+
+@router.post("/upload-logo", status_code=status.HTTP_201_CREATED)
+async def upload_logo(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    if not file.content_type in ["image/png", "image/jpeg"]:
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos PNG o JPEG")
+    
+    if file.size and file.size > 2 * 1024 * 1024:  # Límite de 2MB
+        raise HTTPException(status_code=400, detail="El archivo no debe superar los 2MB")
+    
+    # Generar nombre único para el archivo
+    file_extension = file.filename.split('.')[-1]
+    file_name = f"{uuid.uuid4()}.{file_extension}"
+    file_path = os.path.join(UPLOAD_DIR, file_name)
+    
+    # Guardar el archivo
+    async with aiofiles.open(file_path, 'wb') as out_file:
+        content = await file.read()
+        await out_file.write(content)
+    
+    # Generar URL para el archivo
+    logo_url = f"/uploads/surveys/{file_name}"
+    
+    return {"logo_url": logo_url}
+
+# ------------------------------
+# SERVIR ARCHIVOS ESTÁTICOS
+# ------------------------------
+
+@router.get("/uploads/surveys/{filename}")
+async def serve_logo(filename: str):
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return FileResponse(file_path)
+
+# ------------------------------
 # CRUD ENCUESTAS
 # ------------------------------
 
@@ -86,6 +151,7 @@ async def create_survey(
     survey_data["creator_id"] = current_user.id
     survey_data["created_at"] = datetime.utcnow()
     survey_data["updated_at"] = datetime.utcnow()
+    survey_data["status"] = update_survey_status(survey_data)
 
     for q in survey_data["questions"]:
         if not q.get("_id") or is_temp_id(q.get("_id", "")):
@@ -95,23 +161,36 @@ async def create_survey(
     new_survey = await surveys_collection.find_one({"_id": result.inserted_id})
     return Survey(**convert_objectids_to_str(new_survey))
 
-
 @router.get("/", response_model=List[Survey])
 async def get_surveys(
     current_user: User = Depends(get_current_user),
     surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
 ):
     surveys = await surveys_collection.find({"creator_id": current_user.id}).to_list(1000)
-    return [Survey(**convert_objectids_to_str(s)) for s in surveys]
-
+    updated_surveys = []
+    for survey in surveys:
+        survey["status"] = update_survey_status(survey)
+        await surveys_collection.update_one(
+            {"_id": survey["_id"]},
+            {"$set": {"status": survey["status"]}}
+        )
+        updated_surveys.append(Survey(**convert_objectids_to_str(survey)))
+    return updated_surveys
 
 @router.get("/public", response_model=List[Survey])
 async def get_public_surveys(
     surveys_collection: AsyncIOMotorClient = Depends(get_surveys_collection_dependency)
 ):
     surveys = await surveys_collection.find({"is_public": True}).to_list(1000)
-    return [Survey(**convert_objectids_to_str(s)) for s in surveys]
-
+    updated_surveys = []
+    for survey in surveys:
+        survey["status"] = update_survey_status(survey)
+        await surveys_collection.update_one(
+            {"_id": survey["_id"]},
+            {"$set": {"status": survey["status"]}}
+        )
+        updated_surveys.append(Survey(**convert_objectids_to_str(survey)))
+    return updated_surveys
 
 @router.get("/public/{id}", response_model=Survey)
 async def get_public_survey_by_id(
@@ -123,10 +202,26 @@ async def get_public_survey_by_id(
 
     survey = await surveys_collection.find_one({"_id": ObjectId(id), "is_public": True})
     if not survey:
-        raise HTTPException(status_code=404, detail="Encuesta no encontrada o privada")
+        raise HTTPException(status_code=404, detail="Encuesta no encontrada o no es pública")
+
+    survey["status"] = update_survey_status(survey)
+    await surveys_collection.update_one(
+        {"_id": survey["_id"]},
+        {"$set": {"status": survey["status"]}}
+    )
+    
+    if survey["status"] == "created" and survey.get("start_date"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Esta encuesta no está disponible aún. Abre el {datetime.fromisoformat(survey['start_date'].replace('Z', '+00:00')).strftime('%d de %B de %Y, %H:%M')}."
+        )
+    elif survey["status"] == "closed" and survey.get("end_date"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Esta encuesta ha finalizado. Cerró el {datetime.fromisoformat(survey['end_date'].replace('Z', '+00:00')).strftime('%d de %B de %Y, %H:%M')}."
+        )
 
     return Survey(**convert_objectids_to_str(survey))
-
 
 @router.get("/{id}", response_model=Survey)
 async def get_survey_by_id(
@@ -141,8 +236,12 @@ async def get_survey_by_id(
     if not survey:
         raise HTTPException(status_code=404, detail="Encuesta no encontrada")
 
+    survey["status"] = update_survey_status(survey)
+    await surveys_collection.update_one(
+        {"_id": survey["_id"]},
+        {"$set": {"status": survey["status"]}}
+    )
     return Survey(**convert_objectids_to_str(survey))
-
 
 @router.put("/{id}", response_model=Survey)
 async def update_survey(
@@ -160,6 +259,7 @@ async def update_survey(
 
     update_data = survey.model_dump(by_alias=True, exclude=["id", "creator_id", "created_at"])
     update_data["updated_at"] = datetime.utcnow()
+    update_data["status"] = update_survey_status(update_data)
 
     temp_id_map = {}
     for q in update_data.get("questions", []):
@@ -179,7 +279,6 @@ async def update_survey(
     await surveys_collection.update_one({"_id": ObjectId(id)}, {"$set": update_data})
     updated = await surveys_collection.find_one({"_id": ObjectId(id)})
     return Survey(**convert_objectids_to_str(updated))
-
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_survey(
@@ -209,14 +308,25 @@ async def submit_survey_response(
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="ID inválido")
 
-    # 🔁 Aquí ya no se filtra por is_public
     doc = await surveys_collection.find_one({"_id": ObjectId(id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Encuesta no encontrada")
 
-    # Si quieres validar acceso privado, hazlo aquí (ej: por token en request)
-
     survey = Survey(**convert_objectids_to_str(doc))
+    
+    # Validar fechas
+    now = datetime.utcnow()
+    if survey.start_date and now < survey.start_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Esta encuesta no está disponible aún. Abre el {survey.start_date.strftime('%d de %B de %Y, %H:%M')}."
+        )
+    if survey.end_date and now > survey.end_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Esta encuesta ha finalizado. Cerró el {survey.end_date.strftime('%d de %B de %Y, %H:%M')}."
+        )
+
     responder_email = response_data.pop("responder_email", None)
     answers = response_data
 
@@ -243,7 +353,6 @@ async def submit_survey_response(
     result = await responses_collection.insert_one(submission)
     return {"message": "Respuesta registrada", "response_id": str(result.inserted_id)}
 
-
 # ------------------------------
 # ESTADÍSTICAS Y RESPUESTAS
 # ------------------------------
@@ -264,7 +373,6 @@ async def get_survey_responses(
     responses = await responses_collection.find({"survey_id": ObjectId(id)}).to_list(1000)
     return [SurveyResponse(**convert_objectids_to_str(r)) for r in responses]
 
-
 @router.get("/{id}/stats")
 async def get_survey_stats(
     id: str,
@@ -279,7 +387,12 @@ async def get_survey_stats(
     if not survey or str(survey["creator_id"]) != str(current_user.id):
         raise HTTPException(status_code=403, detail="No autorizado")
 
-    # Extraer todos los parámetros de filtro
+    survey["status"] = update_survey_status(survey)
+    await surveys_collection.update_one(
+        {"_id": survey["_id"]},
+        {"$set": {"status": survey["status"]}}
+    )
+
     filters = dict(request.query_params)
     filter_pairs = []
     
@@ -287,27 +400,149 @@ async def get_survey_stats(
     while f"filter_qid_{i}" in filters:
         if f"filter_value_{i}" in filters and f"filter_operator_{i}" in filters:
             try:
-                value = float(filters[f"filter_value_{i}"])  # Convertir a float para soportar decimales
+                value = float(filters[f"filter_value_{i}"])
                 filter_pairs.append({
                     "qid": filters[f"filter_qid_{i}"],
                     "value": value,
-                    "operator": filters[f"filter_operator_{i}"]
+                    "operator": filters[f"filter_operator_{i}"],
                 })
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Valor inválido para el filtro {i}")
         i += 1
 
-    # Validar operadores
     valid_operators = {"equals", "less_than", "greater_than", "less_than_or_equal", "greater_than_or_equal"}
     for f in filter_pairs:
         if f["operator"] not in valid_operators:
             raise HTTPException(status_code=400, detail=f"Operador inválido: {f['operator']}")
-
-    # Validar que los filtros sean para preguntas de tipo number_input
-    question_ids = {str(q["_id"]) for q in survey.get("questions", []) if q["type"] == "number_input"}
-    for f in filter_pairs:
-        if f["qid"] not in question_ids:
+        if f["qid"] not in {str(q["_id"]) for q in survey.get("questions", []) if q["type"] == "number_input"}:
             raise HTTPException(status_code=400, detail=f"El filtro para la pregunta {f['qid']} no es de tipo number_input")
 
     stats = await compute_survey_statistics(id, filter_pairs)
     return stats
+
+@router.get("/{id}/final-report", response_class=FileResponse)
+async def get_final_report(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    surveys_collection=Depends(get_surveys_collection_dependency),
+    responses_collection=Depends(get_responses_collection_dependency)
+):
+    if not ObjectId.is_valid(id):
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    survey = await surveys_collection.find_one({"_id": ObjectId(id)})
+    if not survey or str(survey["creator_id"]) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    survey["status"] = update_survey_status(survey)
+
+    from app.services.survey_stats import compute_survey_statistics
+    stats = await compute_survey_statistics(id, [])
+
+    # 🔁 Convertir el dict a una lista para el template
+    formatted_stats = []
+    for qid, q in stats.items():
+        question_summary = {
+            "question": q["text"],
+            "type": q["type"],
+            "data": q.get("options", {}),
+            "total": sum(q.get("options", {}).values())
+        }
+
+        if q["type"] == "number_input" and q.get("responses"):
+            question_summary.update({
+                "avg": q.get("avg"),
+                "median": q.get("median"),
+                "min": q.get("min"),
+                "max": q.get("max")
+            })
+        elif q["type"] == "text_input" and "word_cloud" in q:
+            word_data = {w["word"]: w["count"] for w in q["word_cloud"]}
+            question_summary["data"] = word_data
+            question_summary["total"] = sum(word_data.values())
+
+        formatted_stats.append(question_summary)
+
+    # 📝 Generar PDF
+    os.makedirs("reports", exist_ok=True)
+    filename = f"reports/survey_report_{id}.pdf"
+    generate_pdf_report(survey, formatted_stats, filename)
+
+    # 📄 Devolver archivo PDF
+    response = FileResponse(
+        filename,
+        media_type="application/pdf",
+        filename=f"Informe_{survey['title'].replace(' ', '_')}.pdf"
+    )
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+def format_date(date_val):
+    try:
+        if isinstance(date_val, datetime):
+            return date_val.strftime("%Y-%m-%d %H:%M")
+        if isinstance(date_val, str):
+            dt = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+    return ""
+
+@router.get("/{id}/export", response_class=StreamingResponse)
+async def export_survey_data(
+    id: str,
+    format: str = "csv",  # "csv" o "xlsx"
+    current_user: User = Depends(get_current_user),
+    surveys_collection=Depends(get_surveys_collection_dependency),
+    responses_collection=Depends(get_responses_collection_dependency)
+):
+    if not ObjectId.is_valid(id):
+        raise HTTPException(status_code=400, detail="ID inválido")
+
+    survey = await surveys_collection.find_one({"_id": ObjectId(id)})
+    if not survey or str(survey["creator_id"]) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    responses = await responses_collection.find({"survey_id": ObjectId(id)}).to_list(1000)
+    if not responses:
+        raise HTTPException(status_code=404, detail="No hay respuestas para exportar")
+
+    rows = []
+    for res in responses:
+        row = {
+            "_id": str(res.get("_id", "")),
+            "Email": res.get("responder_email", ""),
+            "Fecha de envío": format_date(res.get("submitted_at"))
+        }
+        for q in survey.get("questions", []):
+            qid = str(q["_id"])
+            qtext = q["text"]
+            answer = res.get("answers", {}).get(qid, "")
+            if isinstance(answer, list):
+                row[qtext] = ", ".join(map(str, answer))
+            else:
+                row[qtext] = str(answer)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    if format == "xlsx":
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Respuestas")
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename=encuesta_{id}.xlsx"}
+        )
+
+    else:
+        output = StringIO()
+        df.to_csv(output, index=False)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=encuesta_{id}.csv"}
+        )

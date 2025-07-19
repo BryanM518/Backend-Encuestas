@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.database import connect_to_mongo, close_mongo_connection
 from app.routes import survey_routes, auth_routes, survey_response_routes, survey_invitations_routes
 
@@ -25,6 +26,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"]
 )
+
+# Montar directorio estático para los logos
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Eventos de conexión a la base de datos
 @app.on_event("startup")

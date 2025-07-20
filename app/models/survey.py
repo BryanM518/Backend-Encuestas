@@ -224,3 +224,29 @@ class SurveyAccessToken(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     expires_at: Optional[datetime] = None
     is_used: bool = False
+
+class SurveyTemplate(SurveyBase):
+    id: PyObjectIdStr = Field(default_factory=PyObjectIdStr, alias="_id")
+    is_template: bool = True
+    creator_id: Optional[PyObjectIdStr] = Field(None, description="ID del creador (opcional para plantillas)")
+    created_at: Optional[datetime] = Field(None, description="Fecha de creación")
+    updated_at: Optional[datetime] = Field(None, description="Fecha de última actualización")
+    status: Optional[str] = Field("published", description="Estado de la plantilla")
+
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str},
+        "json_schema_extra": {
+            "example": {
+                "title": "Plantilla de Satisfacción",
+                "description": "Plantilla para medir satisfacción del cliente",
+                "questions": [],
+                "is_template": True,
+                "logo_file_id": None,
+                "primary_color": "#3498db",
+                "secondary_color": "#2ecc71",
+                "font_family": "Roboto"
+            }
+        }
+    }

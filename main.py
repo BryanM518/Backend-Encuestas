@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.database import connect_to_mongo, close_mongo_connection
-from app.routes import survey_files_routes, survey_routes, auth_routes, survey_response_routes, survey_invitations_routes, survey_exports_routes
+from app.routes import survey_files_routes, survey_routes, auth_routes, survey_response_routes, survey_invitations_routes, survey_exports_routes, survey_templates
 
 app = FastAPI(
     title="API de Encuestas Inteligentes",
@@ -46,8 +46,8 @@ app.include_router(survey_response_routes.router, tags=["Survey Responses"], pre
 app.include_router(survey_invitations_routes.router, tags=["Survey Invitations"], prefix="/api/survey_api/invitations")
 app.include_router(survey_exports_routes.router, tags=["Survey Exports"], prefix="/api/survey_api/surveys")
 app.include_router(survey_files_routes.router, tags=["Survey Files"], prefix="/api/survey_api/surveys")
+app.include_router(survey_templates.router, tags=["Survey Templates"])
 
 @app.get("/", tags=["Root"])
 async def read_root():
     return {"message": "Bienvenido a la API de Encuestas Inteligentes"}
-

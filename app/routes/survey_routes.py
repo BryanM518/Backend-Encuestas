@@ -192,7 +192,6 @@ async def get_public_survey_by_id(
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="ID inválido")
 
-    # Usar un pipeline de agregación para obtener la versión más reciente de la encuesta
     pipeline = [
         {
             "$match": {
@@ -235,7 +234,7 @@ async def get_public_survey_by_id(
         raise HTTPException(status_code=404, detail="Encuesta no encontrada o no es pública")
 
     survey = surveys[0]
-    print("Survey before serialization:", survey)  # Depuración: Imprimir documento crudo
+    print("Survey before serialization:", survey)
     survey["status"] = update_survey_status(survey)
     await surveys_collection.update_one(
         {"_id": survey["_id"]},
@@ -254,7 +253,7 @@ async def get_public_survey_by_id(
         )
 
     serialized_survey = Survey(**convert_objectids_to_str(survey))
-    print("Survey after serialization:", serialized_survey.model_dump())  # Depuración: Imprimir documento serializado
+    print("Survey after serialization:", serialized_survey.model_dump())
     return serialized_survey
 
 @router.get("/{id}", response_model=Survey)
@@ -344,7 +343,7 @@ async def submit_survey_response(
     result = await responses_collection.insert_one(submission)
     return {"message": "Respuesta registrada", "response_id": str(result.inserted_id)}
 
-@router.post("/{survey_id}/clone", response_model=Survey)
+@router.post("/{id}/clone", response_model=Survey)
 async def clone_survey_version(
     survey_id: str,
     current_user: User = Depends(get_current_user),

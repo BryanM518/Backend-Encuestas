@@ -1,3 +1,4 @@
+# survey.py
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any, Literal, Union
 from datetime import datetime
@@ -35,7 +36,6 @@ class PyObjectIdStr(str):
                 raise ValueError("Invalid ObjectId format")
         raise ValueError("Invalid ObjectId format")
 
-
 # ——————————————————————————
 # Logic Condition
 # ——————————————————————————
@@ -58,7 +58,6 @@ class VisibleIfCondition(BaseModel):
             return v
         return str(v)
 
-
 # ——————————————————————————
 # Question Model
 # ——————————————————————————
@@ -68,7 +67,6 @@ class QuestionType(str, Enum):
     SATISFACTION_SCALE = "satisfaction_scale"
     NUMBER_INPUT = "number_input"
     CHECKBOX_GROUP = "checkbox_group"
-
 
 class Question(BaseModel):
     id: PyObjectIdStr = Field(
@@ -100,7 +98,6 @@ class Question(BaseModel):
             self.options = None
         return self
 
-
 # ——————————————————————————
 # Survey Base
 # ——————————————————————————
@@ -111,7 +108,8 @@ class SurveyBase(BaseModel):
     is_public: bool = False
     start_date: Optional[datetime] = Field(None, description="Fecha de apertura de la encuesta")
     end_date: Optional[datetime] = Field(None, description="Fecha de cierre de la encuesta")
-    logo_url: Optional[str] = Field(None, description="URL del logo de la encuesta")
+    logo_file_id: Optional[str] = Field(None, description="ID del archivo del logo en la colección files")
+    logo_content_type: Optional[str] = Field(None, description="Tipo MIME del logo (e.g., image/png, image/jpeg)")
     primary_color: Optional[str] = Field(None, description="Color primario en formato hexadecimal")
     secondary_color: Optional[str] = Field(None, description="Color secundario en formato hexadecimal")
     font_family: Optional[str] = Field(None, description="Tipografía de la encuesta")
@@ -139,13 +137,17 @@ class SurveyBase(BaseModel):
                 raise ValueError(f"La tipografía debe ser una de: {', '.join(valid_fonts)}")
         return v
 
+    @field_validator('logo_content_type')
+    def validate_content_type(cls, v):
+        if v and v not in ["image/png", "image/jpeg"]:
+            raise ValueError("El tipo de contenido debe ser 'image/png' o 'image/jpeg'")
+        return v
 
 # ——————————————————————————
 # Survey Create
 # ——————————————————————————
 class SurveyCreate(SurveyBase):
     pass
-
 
 # ——————————————————————————
 # Survey Model (Full)
@@ -156,8 +158,8 @@ class Survey(SurveyBase):
     created_at: datetime
     updated_at: datetime
     status: str = "created"
-    parent_id: Optional[PyObjectIdStr] = None  # 🔁 Versión original (si aplica)
-    version: int = 1                            # 🔢 Número de versión
+    parent_id: Optional[PyObjectIdStr] = None
+    version: int = 1
 
     model_config = {
         "populate_by_name": True,
@@ -175,7 +177,8 @@ class Survey(SurveyBase):
                 "is_public": False,
                 "start_date": "2023-01-01T09:00:00Z",
                 "end_date": "2023-01-05T23:59:59Z",
-                "logo_url": "https://example.com/logo.png",
+                "logo_file_id": "296796e0-1249-4816-a197-a019eb432fc2",
+                "logo_content_type": "image/png",
                 "primary_color": "#3498db",
                 "secondary_color": "#2ecc71",
                 "font_family": "Roboto",
@@ -184,7 +187,6 @@ class Survey(SurveyBase):
             }
         }
     }
-
 
 # ——————————————————————————
 # Survey Response
@@ -202,7 +204,6 @@ class SurveyResponseBase(BaseModel):
             raise ValueError("Formato de correo electrónico inválido")
         return v
 
-
 class SurveyResponse(SurveyResponseBase):
     id: PyObjectIdStr = Field(default_factory=PyObjectIdStr, alias="_id")
     submitted_at: datetime
@@ -212,7 +213,6 @@ class SurveyResponse(SurveyResponseBase):
         "arbitrary_types_allowed": True,
         "json_encoders": {ObjectId: str},
     }
-
 
 # ——————————————————————————
 # Survey Access Token
